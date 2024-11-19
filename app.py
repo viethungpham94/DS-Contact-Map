@@ -26,11 +26,9 @@ if sum(weights.values()) != 1.0:
     st.sidebar.warning("Weights do not sum to 1. Normalize before proceeding.")
 
 # Embed the CSV file
-file_path = r'F:\Flourishing Group\HQ\Network Mapping\merged_for_AI_test.csv'
 @st.cache_data
 def load_embedded_data():
-    # Replace 'data.csv' with the path to your embedded CSV file
-    return pd.read_csv(file_path)
+    return pd.read_csv(merged_for_AI_test.csv)
 
 # Load the embedded data
 df = load_embedded_data()
