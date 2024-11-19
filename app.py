@@ -28,7 +28,7 @@ if sum(weights.values()) != 1.0:
 # Embed the CSV file
 @st.cache_data
 def load_embedded_data():
-    return pd.read_csv(merged_for_AI_test.csv)
+    return pd.read_csv('merged_for_AI_test.csv')
 
 # Load the embedded data
 df = load_embedded_data()
