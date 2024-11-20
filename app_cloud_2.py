@@ -83,7 +83,7 @@ if lock_inputs and topic_input.strip():
         # Calculate weighted scores
         df_processed['Weighted_Score'] = (
             df_processed['Relevance Scores - about'] * weights['about'] +
-            df_processed['Relevance Scores - edu_exp'] * weights['education & experience'] +
+            df_processed['Relevance Scores - education'] * weights['education & experience'] +
             df_processed['Relevance Scores - social_media'] * weights['social media']
         )
 
@@ -93,14 +93,4 @@ if lock_inputs and topic_input.strip():
         # Pagination for results display
         page_size = 100
         total_pages = len(df_sorted) // page_size + (len(df_sorted) % page_size > 0)
-        page_number = st.number_input("Page Number", min_value=1, max_value=total_pages, step=1)
-
-        start_idx = (page_number - 1) * page_size
-        end_idx = start_idx + page_size
-        st.write(f"Displaying page {page_number} of {total_pages}")
-        st.write(df_sorted.iloc[start_idx:end_idx][[
-            'id', 'name', 'Weighted_Score', 'Relevance Scores - about',
-            'Relevance Scores - edu_exp', 'Relevance Scores - social_media'
-        ]])
-else:
-    st.warning("Please enter a topic and click 'Run Scoring' to start processing.")
+        page_number = st.number_input("Page Number",
