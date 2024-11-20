@@ -25,9 +25,25 @@ weights = {
 if sum(weights.values()) != 1.0:
     st.sidebar.warning("Weights do not sum to 1. Normalize before proceeding.")
 
-# Load precomputed embeddings
 @st.cache_data
-df = pd.read_parquet('merged_for_AI_test.csv')
+def load_data(file_path):
+    # First, check if the Parquet file already exists. If not, convert the CSV to Parquet.
+    parquet_file_path = file_path.replace('.csv', '.parquet')
+    try:
+        df = pd.read_parquet(parquet_file_path)
+        st.write("Loaded data from Parquet file.")
+    except FileNotFoundError:
+        st.write("Parquet file not found, converting CSV to Parquet...")
+        df = pd.read_csv(file_path)
+        df.to_parquet(parquet_file_path)  # Save the CSV as Parquet for future use
+        st.write("CSV file converted to Parquet.")
+    return df
+
+# Provide the CSV file path
+file_path = 'merged_for_AI_test.csv'
+
+# Load the data (either from CSV or Parquet)
+df = load_data(file_path)
 
 # Display the data (Read-only view)
 st.write("Embedded Data:")
