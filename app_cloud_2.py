@@ -141,7 +141,7 @@ def main():
             )
             
             # Prepare results
-            results_df = df[['id', 'name', *REQUIRED_COLUMNS]].copy()
+            results_df = df[['id', 'name', 'url', *REQUIRED_COLUMNS]].copy()
             for col in REQUIRED_COLUMNS:
                 results_df[f'{col}_score'] = column_scores[col]
             results_df['weighted_score'] = weighted_score
