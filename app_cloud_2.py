@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 from sentence_transformers import CrossEncoder
 import numpy as np
-from typing import Dict, List
+from typing import List
 
-# Page config for better UI
+# Page configuration
 st.set_page_config(
-    page_title="Cross-Encoder Relevance Scoring App",
-    page_icon="🎯",
+    page_title="Relevance Scoring App", 
+    page_icon="🎯", 
     layout="wide"
 )
 
-# Constants
-MODEL_NAME = 'cross-encoder/ms-marco-MiniLM-L-6-v2'  # More lightweight and compatible model
+# Configuration
+MODEL_NAME = 'cross-encoder/ms-marco-TinyBERT-L-2-v2'  # Smaller, more efficient model
 REQUIRED_COLUMNS = {'about', 'education & experience', 'social media'}
 PAGE_SIZE = 10
 
@@ -22,54 +22,48 @@ if 'processed_results' not in st.session_state:
 if 'current_page' not in st.session_state:
     st.session_state.current_page = 0
 
-# Cache the model loading
 @st.cache_resource
-def load_model() -> CrossEncoder:
-    """Load and cache the cross-encoder model."""
+def load_model():
+    """Lightweight model loading with error handling."""
     try:
-        return CrossEncoder(MODEL_NAME)
+        return CrossEncoder(MODEL_NAME, max_length=512)
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
+        st.error(f"Model loading error: {e}")
         return None
 
-# Cache data loading
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    """Load and cache the dataset."""
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def load_data():
+    """Data loading with robust error handling."""
     try:
         return pd.read_csv('merged_for_AI_test.csv')
-    except FileNotFoundError:
-        st.error("Data file not found. Please ensure 'merged_for_AI_test.csv' is in the correct location.")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
+        st.error(f"Data loading error: {e}")
         return pd.DataFrame()
 
-def calculate_cross_encoder_scores(
-    texts: List[str],
-    topic: str,
-    model: CrossEncoder
+def batch_cross_encoder_scores(
+    texts: List[str], 
+    topic: str, 
+    model: CrossEncoder, 
+    batch_size: int = 50
 ) -> np.ndarray:
-    """Calculate relevance scores using cross-encoder."""
-    # Prepare pairs of topic and texts
-    text_topic_pairs = [[topic, text] for text in texts]
-    
-    # Predict scores
-    try:
-        # Normalize scores to 0-1 range
-        scores = model.predict(text_topic_pairs)
-        # Apply sigmoid to get probability-like scores
-        normalized_scores = 1 / (1 + np.exp(-scores))
-        return normalized_scores
-    except Exception as e:
-        st.error(f"Error in cross-encoder scoring: {str(e)}")
-        return np.zeros(len(texts))
+    """Batch processing to reduce memory load."""
+    all_scores = []
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i+batch_size]
+        text_topic_pairs = [[topic, text] for text in batch_texts]
+        try:
+            batch_scores = model.predict(text_topic_pairs)
+            normalized_scores = 1 / (1 + np.exp(-batch_scores))
+            all_scores.extend(normalized_scores)
+        except Exception as e:
+            st.error(f"Scoring error in batch {i}: {e}")
+            all_scores.extend([0] * len(batch_texts))
+    return np.array(all_scores)
 
-def display_paginated_results(results_df: pd.DataFrame):
-    """Handle pagination and display of results."""
+def display_results(results_df: pd.DataFrame):
+    """Streamlined results display with pagination."""
     total_pages = len(results_df) // PAGE_SIZE + (1 if len(results_df) % PAGE_SIZE else 0)
     
-    # Create columns for pagination controls
     col1, col2, col3 = st.columns([1, 3, 1])
     
     with col1:
@@ -88,7 +82,6 @@ def display_paginated_results(results_df: pd.DataFrame):
     start_idx = st.session_state.current_page * PAGE_SIZE
     end_idx = min(start_idx + PAGE_SIZE, len(results_df))
     
-    st.write(f"Showing results {start_idx + 1} to {end_idx} of {len(results_df)}")
     st.dataframe(
         results_df.iloc[start_idx:end_idx],
         use_container_width=True,
@@ -96,99 +89,86 @@ def display_paginated_results(results_df: pd.DataFrame):
     )
 
 def main():
-    st.title("Cross-Encoder Relevance Scoring App")
+    st.title("Relevance Scoring App")
     
-    # Load model and data
+    # Load resources
     model = load_model()
     df = load_data()
     
     if model is None or df.empty:
-        st.stop()
+        st.warning("Unable to load resources.")
+        return
     
-    # Verify required columns
+    # Column validation
     if not REQUIRED_COLUMNS.issubset(df.columns):
-        st.error(f"Missing required columns. Expected: {REQUIRED_COLUMNS}")
-        st.stop()
+        st.error(f"Missing columns: {REQUIRED_COLUMNS - set(df.columns)}")
+        return
     
-    # Sidebar weights with normalization
-    st.sidebar.header("Adjust Weights")
+    # Dynamic weight configuration
+    st.sidebar.header("Column Weights")
     weights = {}
     total_weight = 0
     
     for column in REQUIRED_COLUMNS:
         weight = st.sidebar.slider(
-            f"Weight for '{column}'",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.33,
+            f"{column.capitalize()} Weight",
+            min_value=0.0, max_value=1.0,
+            value=1/len(REQUIRED_COLUMNS),
             step=0.01
         )
         weights[column] = weight
         total_weight += weight
     
     # Normalize weights
-    if total_weight > 0:
-        weights = {k: v/total_weight for k, v in weights.items()}
+    weights = {k: v/total_weight for k, v in weights.items()} if total_weight > 0 else {}
     
-    # Topic input
-    topic_input = st.text_input("Enter your topic")
+    # Topic input and processing
+    topic_input = st.text_input("Enter Search Topic")
     
-    # Process button
-    if st.button("Run Scoring", type="primary"):
+    if st.button("Analyze", type="primary"):
         if not topic_input.strip():
-            st.warning("Please enter a topic before processing.")
-            st.stop()
-            
-        with st.spinner("Processing scores..."):
-            # Reset page to 0 when running new search
+            st.warning("Please enter a topic.")
+            return
+        
+        with st.spinner("Processing..."):
             st.session_state.current_page = 0
             
-            # Calculate scores for each column
+            # Score calculation
             scores = {}
             for column in REQUIRED_COLUMNS:
-                # Filter out non-string or empty values
                 valid_texts = df[column].fillna('').astype(str)
-                
-                # Calculate cross-encoder scores
-                scores[f'Relevance Scores - {column}'] = calculate_cross_encoder_scores(
-                    valid_texts.tolist(),
-                    topic_input,
+                scores[column] = batch_cross_encoder_scores(
+                    valid_texts.tolist(), 
+                    topic_input, 
                     model
                 )
             
-            # Calculate weighted scores
+            # Weighted scoring
             weighted_score = sum(
-                scores[f'Relevance Scores - {col}'] * weights[col]
+                scores[col] * weights[col] 
                 for col in REQUIRED_COLUMNS
             )
             
-            # Create results DataFrame
+            # Results preparation
             results_df = df[['id', 'name', *REQUIRED_COLUMNS]].copy()
-            for col, score in scores.items():
-                results_df[col] = score
-            results_df['Weighted_Score'] = weighted_score
+            for col in REQUIRED_COLUMNS:
+                results_df[f'{col}_score'] = scores[col]
+            results_df['weighted_score'] = weighted_score
+            results_df = results_df.sort_values('weighted_score', ascending=False)
             
-            # Sort results
-            results_df = results_df.sort_values(
-                by='Weighted_Score',
-                ascending=False
-            ).reset_index(drop=True)
-            
-            # Store in session state
             st.session_state.processed_results = results_df
     
-    # Display results if available
+    # Results display
     if st.session_state.processed_results is not None:
-        display_paginated_results(st.session_state.processed_results)
+        display_results(st.session_state.processed_results)
         
-        # Add download button
+        # Download option
         csv = st.session_state.processed_results.to_csv(index=False).encode('utf-8')
         st.download_button(
             "Download Results",
             csv,
             "relevance_scores.csv",
-            "text/csv",
-            key='download-csv'
+            "text/csv"
         )
 
 if __name__ == "__main__":
