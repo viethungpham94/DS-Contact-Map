@@ -1,232 +1,192 @@
 import streamlit as st
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import CrossEncoder
 import numpy as np
 from typing import Dict, List
-import torch
-from pathlib import Path
 
-# Constants for column names and weights
-COLUMN_CONFIG = {
-    'about': {
-        'weight_key': 'about',
-        'weight_label': 'About',
-        'embed_col': 'about_embedding',
-        'score_col': 'about_score',
-        'default_weight': 0.33
-    },
-    'edu_exp': {
-        'weight_key': 'education & experience',
-        'weight_label': 'Education & Experience',
-        'embed_col': 'edu_exp_embedding',
-        'score_col': 'edu_exp_score',
-        'default_weight': 0.34
-    },
-    'social_media': {
-        'weight_key': 'social media',
-        'weight_label': 'Social Media',
-        'embed_col': 'social_media_embedding',
-        'score_col': 'social_media_score',
-        'default_weight': 0.33
-    }
-}
+# Page config for better UI
+st.set_page_config(
+    page_title="Cross-Encoder Relevance Scoring App",
+    page_icon="🎯",
+    layout="wide"
+)
 
-class RelevanceScorer:
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
-        self.model = self._load_model(model_name)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    @staticmethod
-    @st.cache_resource
-    def _load_model(model_name: str) -> SentenceTransformer:
-        return SentenceTransformer(model_name)
-    
-    def encode_topic(self, topic: str) -> torch.Tensor:
-        return self.model.encode([topic], convert_to_tensor=True)
-    
-    def calculate_similarity(self, embedding_str: str, topic_embedding: torch.Tensor) -> float:
-        try:
-            if pd.isna(embedding_str):
-                return 0.0
-            embedding = np.array(eval(embedding_str)) if isinstance(embedding_str, str) else embedding_str
-            return float(util.cos_sim(embedding, topic_embedding).squeeze())
-        except Exception as e:
-            st.error(f"Error calculating similarity: {str(e)}")
-            return 0.0
+# Constants
+MODEL_NAME = 'cross-encoder/nli-deberta-v3-base'
+REQUIRED_COLUMNS = {'about', 'education & experience', 'social media'}
+PAGE_SIZE = 10
 
-    def calculate_relevance_scores(self, batch_df: pd.DataFrame, topic_embedding: torch.Tensor) -> pd.DataFrame:
-        result_df = batch_df.copy()
-        
-        for config in COLUMN_CONFIG.values():
-            embed_col = config['embed_col']
-            score_col = config['score_col']
-            
-            if embed_col in result_df.columns:
-                result_df[score_col] = result_df[embed_col].apply(
-                    lambda x: self.calculate_similarity(x, topic_embedding)
-                )
-            else:
-                st.warning(f"Missing embedding column: {embed_col}")
-                result_df[score_col] = 0.0
-                
-        return result_df
+# Initialize session state
+if 'processed_results' not in st.session_state:
+    st.session_state.processed_results = None
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 0
 
-class DataLoader:
-    @staticmethod
-    @st.cache_data
-    def load_data(file_path: str) -> pd.DataFrame:
-        file_path = Path(file_path)
-        parquet_path = file_path.with_suffix('.parquet')
-        
-        try:
-            df = pd.read_parquet(parquet_path)
-            st.success("✅ Data loaded successfully from Parquet file")
-        except FileNotFoundError:
-            try:
-                st.info("Converting CSV to Parquet format...")
-                df = pd.read_csv(file_path)
-                df.to_parquet(parquet_path)
-                st.success("✅ CSV successfully converted to Parquet")
-            except FileNotFoundError:
-                st.error(f"❌ No data file found at {file_path}")
-                raise
-            except Exception as e:
-                st.error(f"❌ Error loading data: {str(e)}")
-                raise
-        
-        return df
+# Cache the model loading
+@st.cache_resource
+def load_model() -> CrossEncoder:
+    """Load and cache the cross-encoder model."""
+    try:
+        return CrossEncoder(MODEL_NAME)
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        return None
 
-def create_weight_sliders() -> Dict[str, float]:
-    st.sidebar.header("Adjust Weights")
-    weights = {}
-    
-    for config in COLUMN_CONFIG.values():
-        weights[config['weight_key']] = st.sidebar.slider(
-            f"Weight for {config['weight_label']}",
-            0.0, 1.0, config['default_weight'], 0.01
-        )
-    
-    total_weight = sum(weights.values())
-    if abs(total_weight - 1.0) > 0.001:
-        st.sidebar.error(f"⚠️ Weights sum to {total_weight:.2f}. Please adjust to sum to 1.0")
-    
-    return weights
+# Cache data loading
+@st.cache_data
+def load_data() -> pd.DataFrame:
+    """Load and cache the dataset."""
+    try:
+        return pd.read_csv('merged_for_AI_test.csv')
+    except FileNotFoundError:
+        st.error("Data file not found. Please ensure 'merged_for_AI_test.csv' is in the correct location.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        return pd.DataFrame()
 
-def calculate_weighted_scores(df: pd.DataFrame, weights: Dict[str, float]) -> pd.DataFrame:
-    result_df = df.copy()
+def calculate_cross_encoder_scores(
+    texts: List[str],
+    topic: str,
+    model: CrossEncoder
+) -> np.ndarray:
+    """Calculate relevance scores using cross-encoder."""
+    # Prepare pairs of topic and texts
+    text_topic_pairs = [[topic, text] for text in texts]
     
-    # Initialize weighted score to 0
-    result_df['Weighted_Score'] = 0.0
-    
-    # Add each component to the weighted score
-    for config in COLUMN_CONFIG.values():
-        score_col = config['score_col']
-        weight_key = config['weight_key']
-        
-        if score_col in result_df.columns:
-            result_df['Weighted_Score'] += result_df[score_col] * weights[weight_key]
-    
-    return result_df
+    # Predict scores
+    try:
+        scores = model.predict(text_topic_pairs)
+        return scores
+    except Exception as e:
+        st.error(f"Error in cross-encoder scoring: {str(e)}")
+        return np.zeros(len(texts))
 
-def display_results(df: pd.DataFrame, page_size: int = 100):
-    total_pages = len(df) // page_size + (1 if len(df) % page_size > 0 else 0)
-    col1, col2 = st.columns([2, 1])
+def display_paginated_results(results_df: pd.DataFrame):
+    """Handle pagination and display of results."""
+    total_pages = len(results_df) // PAGE_SIZE + (1 if len(results_df) % PAGE_SIZE else 0)
+    
+    # Create columns for pagination controls
+    col1, col2, col3 = st.columns([1, 3, 1])
     
     with col1:
-        page_number = st.number_input("Page", min_value=1, max_value=total_pages, step=1)
+        if st.button("Previous", disabled=st.session_state.current_page <= 0):
+            st.session_state.current_page -= 1
+            st.rerun()
+            
     with col2:
-        st.write(f"Total Pages: {total_pages}")
+        st.write(f"Page {st.session_state.current_page + 1} of {total_pages}")
+        
+    with col3:
+        if st.button("Next", disabled=st.session_state.current_page >= total_pages - 1):
+            st.session_state.current_page += 1
+            st.rerun()
     
-    start_idx = (page_number - 1) * page_size
-    end_idx = start_idx + page_size
+    start_idx = st.session_state.current_page * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, len(results_df))
     
-    # Prepare display columns
-    display_columns = ['id', 'name', 'Weighted_Score']
-    score_columns = [config['score_col'] for config in COLUMN_CONFIG.values()]
-    display_columns.extend(score_columns)
-    
-    # Prepare formatting
-    format_dict = {col: '{:.3f}' for col in ['Weighted_Score'] + score_columns}
-    
+    st.write(f"Showing results {start_idx + 1} to {end_idx} of {len(results_df)}")
     st.dataframe(
-        df.iloc[start_idx:end_idx][display_columns].style.format(format_dict),
-        use_container_width=True
+        results_df.iloc[start_idx:end_idx],
+        use_container_width=True,
+        hide_index=True
     )
 
-def process_batches(df: pd.DataFrame, scorer: RelevanceScorer, topic_embedding: torch.Tensor, 
-                   batch_size: int, progress_text: str = "Processing...") -> pd.DataFrame:
-    results = []
-    total_batches = (len(df) + batch_size - 1) // batch_size
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    try:
-        for batch_idx, i in enumerate(range(0, len(df), batch_size)):
-            status_text.text(f"{progress_text} - Batch {batch_idx + 1}/{total_batches}")
-            
-            batch = df.iloc[i:i+batch_size]
-            processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
-            results.append(processed_batch)
-            
-            progress = min(1.0, (batch_idx + 1) / total_batches)
-            progress_bar.progress(progress)
-    except Exception as e:
-        st.error(f"Error in batch processing: {str(e)}")
-        raise
-    finally:
-        progress_bar.empty()
-        status_text.empty()
-    
-    return pd.concat(results, ignore_index=True)
-
 def main():
-    st.set_page_config(page_title="Relevance Scoring App", layout="wide")
-    st.title("🎯 Relevance Scoring App")
+    st.title("Cross-Encoder Relevance Scoring App")
     
-    try:
-        scorer = RelevanceScorer()
-        weights = create_weight_sliders()
-        
-        df = DataLoader.load_data('merged_for_AI_test.csv')
-        st.write("Preview of loaded data:")
-        st.dataframe(df.head(), use_container_width=True)
-        
-        topic_input = st.text_input("🔍 Enter your topic", help="Enter the topic you want to score against")
-        
-        if st.button("Run Scoring", type="primary", disabled=not topic_input.strip()):
-            if abs(sum(weights.values()) - 1.0) > 0.001:
-                st.error("Please adjust weights to sum to 1.0 before proceeding")
-                return
-                
-            try:
-                topic_embedding = scorer.encode_topic(topic_input)
-                
-                with st.spinner("Processing scores..."):
-                    df_processed = process_batches(
-                        df, 
-                        scorer, 
-                        topic_embedding, 
-                        batch_size=500, 
-                        progress_text="Calculating relevance scores"
-                    )
-                    
-                    df_processed = calculate_weighted_scores(df_processed, weights)
-                    df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
-                    
-                    st.success("✅ Scoring completed successfully!")
-                    display_results(df_sorted)
-                    
-            except Exception as e:
-                st.error("❌ Error during processing")
-                st.error(f"Error details: {str(e)}")
-                st.error("Stack trace:", exception=True)
-        else:
-            st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
+    # Load model and data
+    model = load_model()
+    df = load_data()
+    
+    if model is None or df.empty:
+        st.stop()
+    
+    # Verify required columns
+    if not REQUIRED_COLUMNS.issubset(df.columns):
+        st.error(f"Missing required columns. Expected: {REQUIRED_COLUMNS}")
+        st.stop()
+    
+    # Sidebar weights with normalization
+    st.sidebar.header("Adjust Weights")
+    weights = {}
+    total_weight = 0
+    
+    for column in REQUIRED_COLUMNS:
+        weight = st.sidebar.slider(
+            f"Weight for '{column}'",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.33,
+            step=0.01
+        )
+        weights[column] = weight
+        total_weight += weight
+    
+    # Normalize weights
+    if total_weight > 0:
+        weights = {k: v/total_weight for k, v in weights.items()}
+    
+    # Topic input
+    topic_input = st.text_input("Enter your topic")
+    
+    # Process button
+    if st.button("Run Scoring", type="primary"):
+        if not topic_input.strip():
+            st.warning("Please enter a topic before processing.")
+            st.stop()
             
-    except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        st.error("Stack trace:", exception=True)
+        with st.spinner("Processing scores..."):
+            # Reset page to 0 when running new search
+            st.session_state.current_page = 0
+            
+            # Calculate scores for each column
+            scores = {}
+            for column in REQUIRED_COLUMNS:
+                # Filter out non-string or empty values
+                valid_texts = df[column].fillna('').astype(str)
+                
+                # Calculate cross-encoder scores
+                scores[f'Relevance Scores - {column}'] = calculate_cross_encoder_scores(
+                    valid_texts.tolist(),
+                    topic_input,
+                    model
+                )
+            
+            # Calculate weighted scores
+            weighted_score = sum(
+                scores[f'Relevance Scores - {col}'] * weights[col]
+                for col in REQUIRED_COLUMNS
+            )
+            
+            # Create results DataFrame
+            results_df = df[['id', 'name', *REQUIRED_COLUMNS]].copy()
+            for col, score in scores.items():
+                results_df[col] = score
+            results_df['Weighted_Score'] = weighted_score
+            
+            # Sort results
+            results_df = results_df.sort_values(
+                by='Weighted_Score',
+                ascending=False
+            ).reset_index(drop=True)
+            
+            # Store in session state
+            st.session_state.processed_results = results_df
+    
+    # Display results if available
+    if st.session_state.processed_results is not None:
+        display_paginated_results(st.session_state.processed_results)
+        
+        # Add download button
+        csv = st.session_state.processed_results.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Download Results",
+            csv,
+            "relevance_scores.csv",
+            "text/csv",
+            key='download-csv'
+        )
 
 if __name__ == "__main__":
     main()
