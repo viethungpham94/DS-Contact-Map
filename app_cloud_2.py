@@ -56,7 +56,9 @@ topic_input = st.text_input("Enter your topic")
 def calculate_relevance_scores(batch_df, topic_embedding):
     for col in ['about_embedding', 'edu_exp_embedding', 'social_media_embedding']:
         if col in batch_df:
-            batch_df[f'Relevance Scores - {col.split("_")[0]}'] = batch_df[col].apply(
+            # Generate the relevance score column based on the embedding columns
+            topic_col = col.split('_')[0]  # Extract the part before '_embedding'
+            batch_df[f'Relevance Scores - {topic_col}'] = batch_df[col].apply(
                 lambda emb: float(util.cos_sim(np.array(eval(emb)), topic_embedding).squeeze()) if pd.notna(emb) else 0.0
             )
     return batch_df
@@ -80,27 +82,32 @@ if lock_inputs and topic_input.strip():
         # Combine processed batches
         df_processed = pd.concat(results).reset_index(drop=True)
 
-        # Calculate weighted scores
-        df_processed['Weighted_Score'] = (
-            df_processed['Relevance Scores - about'] * weights['about'] +
-            df_processed['Relevance Scores - education'] * weights['education & experience'] +
-            df_processed['Relevance Scores - social_media'] * weights['social media']
-        )
+        # Ensure the necessary columns are available
+        required_columns = ['Relevance Scores - about', 'Relevance Scores - edu_exp', 'Relevance Scores - social_media']
+        if all(col in df_processed.columns for col in required_columns):
+            # Calculate weighted scores
+            df_processed['Weighted_Score'] = (
+                df_processed['Relevance Scores - about'] * weights['about'] +
+                df_processed['Relevance Scores - edu_exp'] * weights['education & experience'] +
+                df_processed['Relevance Scores - social_media'] * weights['social media']
+            )
 
-        # Sort by weighted scores
-        df_sorted = df_processed.sort_values(by='Weighted_Score', ascending=False).reset_index(drop=True)
+            # Sort by weighted scores
+            df_sorted = df_processed.sort_values(by='Weighted_Score', ascending=False).reset_index(drop=True)
 
-        # Pagination for results display
-        page_size = 100
-        total_pages = len(df_sorted) // page_size + (len(df_sorted) % page_size > 0)
-        page_number = st.number_input("Page Number", min_value=1, max_value=total_pages, step=1)
+            # Pagination for results display
+            page_size = 100
+            total_pages = len(df_sorted) // page_size + (len(df_sorted) % page_size > 0)
+            page_number = st.number_input("Page Number", min_value=1, max_value=total_pages, step=1)
 
-        start_idx = (page_number - 1) * page_size
-        end_idx = start_idx + page_size
-        st.write(f"Displaying page {page_number} of {total_pages}")
-        st.write(df_sorted.iloc[start_idx:end_idx][[
-            'id', 'name', 'Weighted_Score', 'Relevance Scores - about',
-            'Relevance Scores - education', 'Relevance Scores - social_media'
-        ]])
+            start_idx = (page_number - 1) * page_size
+            end_idx = start_idx + page_size
+            st.write(f"Displaying page {page_number} of {total_pages}")
+            st.write(df_sorted.iloc[start_idx:end_idx][[
+                'id', 'name', 'Weighted_Score', 'Relevance Scores - about',
+                'Relevance Scores - edu_exp', 'Relevance Scores - social_media'
+            ]])
+        else:
+            st.error(f"Missing columns: {', '.join([col for col in required_columns if col not in df_processed.columns])}")
 else:
     st.warning("Please enter a topic and click 'Run Scoring' to start processing.")
