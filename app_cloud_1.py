@@ -14,7 +14,7 @@ st.set_page_config(
 
 # Constants
 MODEL_NAME = 'all-MiniLM-L6-v2'
-REQUIRED_COLUMNS = {'about', 'education & experience', 'social media'}
+REQUIRED_COLUMNS = {'url', 'about', 'education & experience', 'social media'}
 
 # Initialize session state for caching results
 if 'processed_results' not in st.session_state:
