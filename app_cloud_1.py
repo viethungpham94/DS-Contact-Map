@@ -14,7 +14,7 @@ st.set_page_config(
 
 # Constants
 MODEL_NAME = 'all-MiniLM-L6-v2'
-REQUIRED_COLUMNS = {'url', 'about', 'education & experience', 'social media'}
+REQUIRED_COLUMNS = {'about', 'education & experience', 'social media'}
 
 # Initialize session state for caching results
 if 'processed_results' not in st.session_state:
@@ -131,7 +131,7 @@ def main():
             )
             
             # Create results DataFrame
-            results_df = df[['id', 'name', *REQUIRED_COLUMNS]].copy()
+            results_df = df[['id', 'name', 'url', *REQUIRED_COLUMNS]].copy()
             for col, score in scores.items():
                 results_df[col] = score
             results_df['Weighted_Score'] = weighted_score
