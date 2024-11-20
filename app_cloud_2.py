@@ -6,11 +6,29 @@ from typing import Dict, List
 import torch
 from pathlib import Path
 
-# Constants for column names
-SCORE_COLUMNS = {
-    'about': {'weight_key': 'about', 'embed_col': 'about_embedding', 'score_col': 'about_score'},
-    'edu_exp': {'weight_key': 'education & experience', 'embed_col': 'edu_exp_embedding', 'score_col': 'edu_exp_score'},
-    'social_media': {'weight_key': 'social media', 'embed_col': 'social_media_embedding', 'score_col': 'social_media_score'}
+# Constants for column names and weights
+COLUMN_CONFIG = {
+    'about': {
+        'weight_key': 'about',
+        'weight_label': 'About',
+        'embed_col': 'about_embedding',
+        'score_col': 'about_score',
+        'default_weight': 0.33
+    },
+    'edu_exp': {
+        'weight_key': 'education & experience',
+        'weight_label': 'Education & Experience',
+        'embed_col': 'edu_exp_embedding',
+        'score_col': 'edu_exp_score',
+        'default_weight': 0.34
+    },
+    'social_media': {
+        'weight_key': 'social media',
+        'weight_label': 'Social Media',
+        'embed_col': 'social_media_embedding',
+        'score_col': 'social_media_score',
+        'default_weight': 0.33
+    }
 }
 
 class RelevanceScorer:
@@ -26,21 +44,31 @@ class RelevanceScorer:
     def encode_topic(self, topic: str) -> torch.Tensor:
         return self.model.encode([topic], convert_to_tensor=True)
     
+    def calculate_similarity(self, embedding_str: str, topic_embedding: torch.Tensor) -> float:
+        try:
+            if pd.isna(embedding_str):
+                return 0.0
+            embedding = np.array(eval(embedding_str)) if isinstance(embedding_str, str) else embedding_str
+            return float(util.cos_sim(embedding, topic_embedding).squeeze())
+        except Exception as e:
+            st.error(f"Error calculating similarity: {str(e)}")
+            return 0.0
+
     def calculate_relevance_scores(self, batch_df: pd.DataFrame, topic_embedding: torch.Tensor) -> pd.DataFrame:
         result_df = batch_df.copy()
         
-        for key, cols in SCORE_COLUMNS.items():
-            embed_col = cols['embed_col']
-            score_col = cols['score_col']
+        for config in COLUMN_CONFIG.values():
+            embed_col = config['embed_col']
+            score_col = config['score_col']
             
-            if embed_col in batch_df:
-                result_df[score_col] = batch_df[embed_col].apply(
-                    lambda emb: float(util.cos_sim(
-                        np.array(eval(emb)) if isinstance(emb, str) else emb,
-                        topic_embedding
-                    ).squeeze()) if pd.notna(emb) else 0.0
+            if embed_col in result_df.columns:
+                result_df[score_col] = result_df[embed_col].apply(
+                    lambda x: self.calculate_similarity(x, topic_embedding)
                 )
-        
+            else:
+                st.warning(f"Missing embedding column: {embed_col}")
+                result_df[score_col] = 0.0
+                
         return result_df
 
 class DataLoader:
@@ -72,11 +100,10 @@ def create_weight_sliders() -> Dict[str, float]:
     st.sidebar.header("Adjust Weights")
     weights = {}
     
-    for key, cols in SCORE_COLUMNS.items():
-        weight_key = cols['weight_key']
-        weights[weight_key] = st.sidebar.slider(
-            f"Weight for '{weight_key.title()}'",
-            0.0, 1.0, 0.33, 0.05
+    for config in COLUMN_CONFIG.values():
+        weights[config['weight_key']] = st.sidebar.slider(
+            f"Weight for {config['weight_label']}",
+            0.0, 1.0, config['default_weight'], 0.01
         )
     
     total_weight = sum(weights.values())
@@ -86,12 +113,20 @@ def create_weight_sliders() -> Dict[str, float]:
     return weights
 
 def calculate_weighted_scores(df: pd.DataFrame, weights: Dict[str, float]) -> pd.DataFrame:
-    # Calculate weighted sum using the score columns
-    df['Weighted_Score'] = sum(
-        df[SCORE_COLUMNS[key]['score_col']] * weights[cols['weight_key']]
-        for key, cols in SCORE_COLUMNS.items()
-    )
-    return df
+    result_df = df.copy()
+    
+    # Initialize weighted score to 0
+    result_df['Weighted_Score'] = 0.0
+    
+    # Add each component to the weighted score
+    for config in COLUMN_CONFIG.values():
+        score_col = config['score_col']
+        weight_key = config['weight_key']
+        
+        if score_col in result_df.columns:
+            result_df['Weighted_Score'] += result_df[score_col] * weights[weight_key]
+    
+    return result_df
 
 def display_results(df: pd.DataFrame, page_size: int = 100):
     total_pages = len(df) // page_size + (1 if len(df) % page_size > 0 else 0)
@@ -107,14 +142,11 @@ def display_results(df: pd.DataFrame, page_size: int = 100):
     
     # Prepare display columns
     display_columns = ['id', 'name', 'Weighted_Score']
-    display_columns.extend(cols['score_col'] for cols in SCORE_COLUMNS.values())
+    score_columns = [config['score_col'] for config in COLUMN_CONFIG.values()]
+    display_columns.extend(score_columns)
     
     # Prepare formatting
-    format_dict = {'Weighted_Score': '{:.3f}'}
-    format_dict.update({
-        cols['score_col']: '{:.3f}'
-        for cols in SCORE_COLUMNS.values()
-    })
+    format_dict = {col: '{:.3f}' for col in ['Weighted_Score'] + score_columns}
     
     st.dataframe(
         df.iloc[start_idx:end_idx][display_columns].style.format(format_dict),
@@ -124,28 +156,27 @@ def display_results(df: pd.DataFrame, page_size: int = 100):
 def process_batches(df: pd.DataFrame, scorer: RelevanceScorer, topic_embedding: torch.Tensor, 
                    batch_size: int, progress_text: str = "Processing...") -> pd.DataFrame:
     results = []
-    total_batches = (len(df) + batch_size - 1) // batch_size  # Ceiling division
+    total_batches = (len(df) + batch_size - 1) // batch_size
     
-    # Create a progress bar
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for batch_idx, i in enumerate(range(0, len(df), batch_size)):
-        # Update status
-        status_text.text(f"{progress_text} - Batch {batch_idx + 1}/{total_batches}")
-        
-        # Process batch
-        batch = df.iloc[i:i+batch_size]
-        processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
-        results.append(processed_batch)
-        
-        # Update progress (ensure it never exceeds 1.0)
-        progress = min(1.0, (batch_idx + 1) / total_batches)
-        progress_bar.progress(progress)
-    
-    # Clean up progress indicators
-    progress_bar.empty()
-    status_text.empty()
+    try:
+        for batch_idx, i in enumerate(range(0, len(df), batch_size)):
+            status_text.text(f"{progress_text} - Batch {batch_idx + 1}/{total_batches}")
+            
+            batch = df.iloc[i:i+batch_size]
+            processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
+            results.append(processed_batch)
+            
+            progress = min(1.0, (batch_idx + 1) / total_batches)
+            progress_bar.progress(progress)
+    except Exception as e:
+        st.error(f"Error in batch processing: {str(e)}")
+        raise
+    finally:
+        progress_bar.empty()
+        status_text.empty()
     
     return pd.concat(results, ignore_index=True)
 
@@ -153,55 +184,49 @@ def main():
     st.set_page_config(page_title="Relevance Scoring App", layout="wide")
     st.title("🎯 Relevance Scoring App")
     
-    # Initialize components
-    scorer = RelevanceScorer()
-    weights = create_weight_sliders()
-    
-    # Load data
     try:
+        scorer = RelevanceScorer()
+        weights = create_weight_sliders()
+        
         df = DataLoader.load_data('merged_for_AI_test.csv')
         st.write("Preview of loaded data:")
         st.dataframe(df.head(), use_container_width=True)
+        
+        topic_input = st.text_input("🔍 Enter your topic", help="Enter the topic you want to score against")
+        
+        if st.button("Run Scoring", type="primary", disabled=not topic_input.strip()):
+            if abs(sum(weights.values()) - 1.0) > 0.001:
+                st.error("Please adjust weights to sum to 1.0 before proceeding")
+                return
+                
+            try:
+                topic_embedding = scorer.encode_topic(topic_input)
+                
+                with st.spinner("Processing scores..."):
+                    df_processed = process_batches(
+                        df, 
+                        scorer, 
+                        topic_embedding, 
+                        batch_size=500, 
+                        progress_text="Calculating relevance scores"
+                    )
+                    
+                    df_processed = calculate_weighted_scores(df_processed, weights)
+                    df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
+                    
+                    st.success("✅ Scoring completed successfully!")
+                    display_results(df_sorted)
+                    
+            except Exception as e:
+                st.error("❌ Error during processing")
+                st.error(f"Error details: {str(e)}")
+                st.error("Stack trace:", exception=True)
+        else:
+            st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
+            
     except Exception as e:
-        st.error(f"Failed to load data: {str(e)}")
-        return
-    
-    # Topic input
-    topic_input = st.text_input("🔍 Enter your topic", help="Enter the topic you want to score against")
-    
-    if st.button("Run Scoring", type="primary", disabled=not topic_input.strip()):
-        if abs(sum(weights.values()) - 1.0) > 0.001:
-            st.error("Please adjust weights to sum to 1.0 before proceeding")
-            return
-            
-        try:
-            # Encode topic
-            topic_embedding = scorer.encode_topic(topic_input)
-            
-            # Process in batches with improved progress tracking
-            df_processed = process_batches(
-                df, 
-                scorer, 
-                topic_embedding, 
-                batch_size=500, 
-                progress_text="Calculating relevance scores"
-            )
-            
-            # Calculate weighted scores
-            df_processed = calculate_weighted_scores(df_processed, weights)
-            
-            # Sort and display
-            df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
-            st.success("✅ Scoring completed successfully!")
-            display_results(df_sorted)
-            
-        except Exception as e:
-            st.error(f"❌ Error during processing: {str(e)}")
-            st.error(f"Error details: {type(e).__name__}")
-            import traceback
-            st.error(traceback.format_exc())
-    else:
-        st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
+        st.error(f"Application error: {str(e)}")
+        st.error("Stack trace:", exception=True)
 
 if __name__ == "__main__":
     main()
