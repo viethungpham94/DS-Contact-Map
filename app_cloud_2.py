@@ -6,6 +6,13 @@ from typing import Dict, List
 import torch
 from pathlib import Path
 
+# Constants for column names
+SCORE_COLUMNS = {
+    'about': {'weight_key': 'about', 'embed_col': 'about_embedding', 'score_col': 'about_score'},
+    'edu_exp': {'weight_key': 'education & experience', 'embed_col': 'edu_exp_embedding', 'score_col': 'edu_exp_score'},
+    'social_media': {'weight_key': 'social media', 'embed_col': 'social_media_embedding', 'score_col': 'social_media_score'}
+}
+
 class RelevanceScorer:
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
         self.model = self._load_model(model_name)
@@ -21,15 +28,13 @@ class RelevanceScorer:
     
     def calculate_relevance_scores(self, batch_df: pd.DataFrame, topic_embedding: torch.Tensor) -> pd.DataFrame:
         result_df = batch_df.copy()
-        embedding_columns = {
-            'about': 'about_embedding',
-            'edu_exp': 'edu_exp_embedding',
-            'social_media': 'social_media_embedding'
-        }
         
-        for key, col in embedding_columns.items():
-            if col in batch_df:
-                result_df[f'Relevance Scores - {key}'] = batch_df[col].apply(
+        for key, cols in SCORE_COLUMNS.items():
+            embed_col = cols['embed_col']
+            score_col = cols['score_col']
+            
+            if embed_col in batch_df:
+                result_df[score_col] = batch_df[embed_col].apply(
                     lambda emb: float(util.cos_sim(
                         np.array(eval(emb)) if isinstance(emb, str) else emb,
                         topic_embedding
@@ -65,11 +70,14 @@ class DataLoader:
 
 def create_weight_sliders() -> Dict[str, float]:
     st.sidebar.header("Adjust Weights")
-    weights = {
-        'about': st.sidebar.slider("Weight for 'About'", 0.0, 1.0, 0.2, 0.05),
-        'education & experience': st.sidebar.slider("Weight for 'Education & Experience'", 0.0, 1.0, 0.6, 0.05),
-        'social media': st.sidebar.slider("Weight for 'Social Media'", 0.0, 1.0, 0.2, 0.05)
-    }
+    weights = {}
+    
+    for key, cols in SCORE_COLUMNS.items():
+        weight_key = cols['weight_key']
+        weights[weight_key] = st.sidebar.slider(
+            f"Weight for '{weight_key.title()}'",
+            0.0, 1.0, 0.33, 0.05
+        )
     
     total_weight = sum(weights.values())
     if abs(total_weight - 1.0) > 0.001:
@@ -78,10 +86,10 @@ def create_weight_sliders() -> Dict[str, float]:
     return weights
 
 def calculate_weighted_scores(df: pd.DataFrame, weights: Dict[str, float]) -> pd.DataFrame:
-    df['Weighted_Score'] = (
-        df['Relevance Scores - about'] * weights['about'] +
-        df['Relevance Scores - edu_exp'] * weights['education & experience'] +
-        df['Relevance Scores - social_media'] * weights['social media']
+    # Calculate weighted sum using the score columns
+    df['Weighted_Score'] = sum(
+        df[SCORE_COLUMNS[key]['score_col']] * weights[cols['weight_key']]
+        for key, cols in SCORE_COLUMNS.items()
     )
     return df
 
@@ -97,18 +105,19 @@ def display_results(df: pd.DataFrame, page_size: int = 100):
     start_idx = (page_number - 1) * page_size
     end_idx = start_idx + page_size
     
-    display_columns = [
-        'id', 'name', 'Weighted_Score',
-        'Relevance Scores - about', 'Relevance Scores - edu_exp', 'Relevance Scores - social_media'
-    ]
+    # Prepare display columns
+    display_columns = ['id', 'name', 'Weighted_Score']
+    display_columns.extend(cols['score_col'] for cols in SCORE_COLUMNS.values())
+    
+    # Prepare formatting
+    format_dict = {'Weighted_Score': '{:.3f}'}
+    format_dict.update({
+        cols['score_col']: '{:.3f}'
+        for cols in SCORE_COLUMNS.values()
+    })
     
     st.dataframe(
-        df.iloc[start_idx:end_idx][display_columns].style.format({
-            'Weighted_Score': '{:.3f}',
-            'Relevance Scores - about': '{:.3f}',
-            'Relevance Scores - edu_exp': '{:.3f}',
-            'Relevance Scores - social_media': '{:.3f}'
-        }),
+        df.iloc[start_idx:end_idx][display_columns].style.format(format_dict),
         use_container_width=True
     )
 
@@ -188,6 +197,9 @@ def main():
             
         except Exception as e:
             st.error(f"❌ Error during processing: {str(e)}")
+            st.error(f"Error details: {type(e).__name__}")
+            import traceback
+            st.error(traceback.format_exc())
     else:
         st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
 
