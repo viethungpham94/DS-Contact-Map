@@ -112,6 +112,34 @@ def display_results(df: pd.DataFrame, page_size: int = 100):
         use_container_width=True
     )
 
+def process_batches(df: pd.DataFrame, scorer: RelevanceScorer, topic_embedding: torch.Tensor, 
+                   batch_size: int, progress_text: str = "Processing...") -> pd.DataFrame:
+    results = []
+    total_batches = (len(df) + batch_size - 1) // batch_size  # Ceiling division
+    
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for batch_idx, i in enumerate(range(0, len(df), batch_size)):
+        # Update status
+        status_text.text(f"{progress_text} - Batch {batch_idx + 1}/{total_batches}")
+        
+        # Process batch
+        batch = df.iloc[i:i+batch_size]
+        processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
+        results.append(processed_batch)
+        
+        # Update progress (ensure it never exceeds 1.0)
+        progress = min(1.0, (batch_idx + 1) / total_batches)
+        progress_bar.progress(progress)
+    
+    # Clean up progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    return pd.concat(results, ignore_index=True)
+
 def main():
     st.set_page_config(page_title="Relevance Scoring App", layout="wide")
     st.title("🎯 Relevance Scoring App")
@@ -137,33 +165,29 @@ def main():
             st.error("Please adjust weights to sum to 1.0 before proceeding")
             return
             
-        with st.spinner("Processing scores..."):
-            try:
-                # Encode topic
-                topic_embedding = scorer.encode_topic(topic_input)
-                
-                # Process in batches
-                batch_size = 500
-                results = []
-                progress_bar = st.progress(0)
-                
-                for i in range(0, len(df), batch_size):
-                    batch = df.iloc[i:i+batch_size]
-                    processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
-                    results.append(processed_batch)
-                    progress_bar.progress((i + batch_size) / len(df))
-                
-                # Combine results
-                df_processed = pd.concat(results, ignore_index=True)
-                df_processed = calculate_weighted_scores(df_processed, weights)
-                
-                # Sort and display
-                df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
-                st.success("✅ Scoring completed successfully!")
-                display_results(df_sorted)
-                
-            except Exception as e:
-                st.error(f"❌ Error during processing: {str(e)}")
+        try:
+            # Encode topic
+            topic_embedding = scorer.encode_topic(topic_input)
+            
+            # Process in batches with improved progress tracking
+            df_processed = process_batches(
+                df, 
+                scorer, 
+                topic_embedding, 
+                batch_size=500, 
+                progress_text="Calculating relevance scores"
+            )
+            
+            # Calculate weighted scores
+            df_processed = calculate_weighted_scores(df_processed, weights)
+            
+            # Sort and display
+            df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
+            st.success("✅ Scoring completed successfully!")
+            display_results(df_sorted)
+            
+        except Exception as e:
+            st.error(f"❌ Error during processing: {str(e)}")
     else:
         st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
 
