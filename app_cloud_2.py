@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 # Constants
-MODEL_NAME = 'cross-encoder/nli-deberta-v3-base'
+MODEL_NAME = 'cross-encoder/ms-marco-MiniLM-L-6-v2'  # More lightweight and compatible model
 REQUIRED_COLUMNS = {'about', 'education & experience', 'social media'}
 PAGE_SIZE = 10
 
@@ -56,8 +56,11 @@ def calculate_cross_encoder_scores(
     
     # Predict scores
     try:
+        # Normalize scores to 0-1 range
         scores = model.predict(text_topic_pairs)
-        return scores
+        # Apply sigmoid to get probability-like scores
+        normalized_scores = 1 / (1 + np.exp(-scores))
+        return normalized_scores
     except Exception as e:
         st.error(f"Error in cross-encoder scoring: {str(e)}")
         return np.zeros(len(texts))
