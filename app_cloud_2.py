@@ -2,112 +2,170 @@ import streamlit as st
 import pandas as pd
 from sentence_transformers import SentenceTransformer, util
 import numpy as np
+from typing import Dict, List
+import torch
+from pathlib import Path
 
-# Title of the app
-st.title("Relevance Scoring App with Custom Weights and Single Topic")
+class RelevanceScorer:
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
+        self.model = self._load_model(model_name)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    @staticmethod
+    @st.cache_resource
+    def _load_model(model_name: str) -> SentenceTransformer:
+        return SentenceTransformer(model_name)
+    
+    def encode_topic(self, topic: str) -> torch.Tensor:
+        return self.model.encode([topic], convert_to_tensor=True)
+    
+    def calculate_relevance_scores(self, batch_df: pd.DataFrame, topic_embedding: torch.Tensor) -> pd.DataFrame:
+        result_df = batch_df.copy()
+        embedding_columns = {
+            'about': 'about_embedding',
+            'edu_exp': 'edu_exp_embedding',
+            'social_media': 'social_media_embedding'
+        }
+        
+        for key, col in embedding_columns.items():
+            if col in batch_df:
+                result_df[f'Relevance Scores - {key}'] = batch_df[col].apply(
+                    lambda emb: float(util.cos_sim(
+                        np.array(eval(emb)) if isinstance(emb, str) else emb,
+                        topic_embedding
+                    ).squeeze()) if pd.notna(emb) else 0.0
+                )
+        
+        return result_df
 
-# Load the pre-trained model
-@st.cache_resource
-def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+class DataLoader:
+    @staticmethod
+    @st.cache_data
+    def load_data(file_path: str) -> pd.DataFrame:
+        file_path = Path(file_path)
+        parquet_path = file_path.with_suffix('.parquet')
+        
+        try:
+            df = pd.read_parquet(parquet_path)
+            st.success("✅ Data loaded successfully from Parquet file")
+        except FileNotFoundError:
+            try:
+                st.info("Converting CSV to Parquet format...")
+                df = pd.read_csv(file_path)
+                df.to_parquet(parquet_path)
+                st.success("✅ CSV successfully converted to Parquet")
+            except FileNotFoundError:
+                st.error(f"❌ No data file found at {file_path}")
+                raise
+            except Exception as e:
+                st.error(f"❌ Error loading data: {str(e)}")
+                raise
+        
+        return df
 
-model = load_model()
+def create_weight_sliders() -> Dict[str, float]:
+    st.sidebar.header("Adjust Weights")
+    weights = {
+        'about': st.sidebar.slider("Weight for 'About'", 0.0, 1.0, 0.2, 0.05),
+        'education & experience': st.sidebar.slider("Weight for 'Education & Experience'", 0.0, 1.0, 0.6, 0.05),
+        'social media': st.sidebar.slider("Weight for 'Social Media'", 0.0, 1.0, 0.2, 0.05)
+    }
+    
+    total_weight = sum(weights.values())
+    if abs(total_weight - 1.0) > 0.001:
+        st.sidebar.error(f"⚠️ Weights sum to {total_weight:.2f}. Please adjust to sum to 1.0")
+    
+    return weights
 
-# Sidebar for weight sliders
-st.sidebar.header("Adjust Weights")
-weights = {
-    'about': st.sidebar.slider("Weight for 'About'", min_value=0.0, max_value=1.0, value=0.2, step=0.05),
-    'education & experience': st.sidebar.slider("Weight for 'Education & Experience'", min_value=0.0, max_value=1.0, value=0.6, step=0.05),
-    'social media': st.sidebar.slider("Weight for 'Social Media'", min_value=0.0, max_value=1.0, value=0.2, step=0.05),
-}
-
-# Ensure weights sum to 1
-if sum(weights.values()) != 1.0:
-    st.sidebar.warning("Weights do not sum to 1. Normalize before proceeding.")
-
-@st.cache_data
-def load_data(file_path):
-    # First, check if the Parquet file already exists. If not, convert the CSV to Parquet.
-    parquet_file_path = file_path.replace('.csv', '.parquet')
-    try:
-        df = pd.read_parquet(parquet_file_path)
-        st.write("Loaded data from Parquet file.")
-    except FileNotFoundError:
-        st.write("Parquet file not found, converting CSV to Parquet...")
-        df = pd.read_csv(file_path)
-        df.to_parquet(parquet_file_path)  # Save the CSV as Parquet for future use
-        st.write("CSV file converted to Parquet.")
+def calculate_weighted_scores(df: pd.DataFrame, weights: Dict[str, float]) -> pd.DataFrame:
+    df['Weighted_Score'] = (
+        df['Relevance Scores - about'] * weights['about'] +
+        df['Relevance Scores - edu_exp'] * weights['education & experience'] +
+        df['Relevance Scores - social_media'] * weights['social media']
+    )
     return df
 
-# Provide the CSV file path
-file_path = 'merged_for_AI_test.csv'
+def display_results(df: pd.DataFrame, page_size: int = 100):
+    total_pages = len(df) // page_size + (1 if len(df) % page_size > 0 else 0)
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        page_number = st.number_input("Page", min_value=1, max_value=total_pages, step=1)
+    with col2:
+        st.write(f"Total Pages: {total_pages}")
+    
+    start_idx = (page_number - 1) * page_size
+    end_idx = start_idx + page_size
+    
+    display_columns = [
+        'id', 'name', 'Weighted_Score',
+        'Relevance Scores - about', 'Relevance Scores - edu_exp', 'Relevance Scores - social_media'
+    ]
+    
+    st.dataframe(
+        df.iloc[start_idx:end_idx][display_columns].style.format({
+            'Weighted_Score': '{:.3f}',
+            'Relevance Scores - about': '{:.3f}',
+            'Relevance Scores - edu_exp': '{:.3f}',
+            'Relevance Scores - social_media': '{:.3f}'
+        }),
+        use_container_width=True
+    )
 
-# Load the data (either from CSV or Parquet)
-df = load_data(file_path)
+def main():
+    st.set_page_config(page_title="Relevance Scoring App", layout="wide")
+    st.title("🎯 Relevance Scoring App")
+    
+    # Initialize components
+    scorer = RelevanceScorer()
+    weights = create_weight_sliders()
+    
+    # Load data
+    try:
+        df = DataLoader.load_data('merged_for_AI_test.csv')
+        st.write("Preview of loaded data:")
+        st.dataframe(df.head(), use_container_width=True)
+    except Exception as e:
+        st.error(f"Failed to load data: {str(e)}")
+        return
+    
+    # Topic input
+    topic_input = st.text_input("🔍 Enter your topic", help="Enter the topic you want to score against")
+    
+    if st.button("Run Scoring", type="primary", disabled=not topic_input.strip()):
+        if abs(sum(weights.values()) - 1.0) > 0.001:
+            st.error("Please adjust weights to sum to 1.0 before proceeding")
+            return
+            
+        with st.spinner("Processing scores..."):
+            try:
+                # Encode topic
+                topic_embedding = scorer.encode_topic(topic_input)
+                
+                # Process in batches
+                batch_size = 500
+                results = []
+                progress_bar = st.progress(0)
+                
+                for i in range(0, len(df), batch_size):
+                    batch = df.iloc[i:i+batch_size]
+                    processed_batch = scorer.calculate_relevance_scores(batch, topic_embedding)
+                    results.append(processed_batch)
+                    progress_bar.progress((i + batch_size) / len(df))
+                
+                # Combine results
+                df_processed = pd.concat(results, ignore_index=True)
+                df_processed = calculate_weighted_scores(df_processed, weights)
+                
+                # Sort and display
+                df_sorted = df_processed.sort_values('Weighted_Score', ascending=False, ignore_index=True)
+                st.success("✅ Scoring completed successfully!")
+                display_results(df_sorted)
+                
+            except Exception as e:
+                st.error(f"❌ Error during processing: {str(e)}")
+    else:
+        st.info("👆 Enter a topic and click 'Run Scoring' to start processing")
 
-# Display the data (Read-only view)
-st.write("Embedded Data:")
-st.write(df.head())  # Show only a preview for large datasets
-
-# Topic input from the user
-topic_input = st.text_input("Enter your topic")
-
-# Batch processing function for scoring
-def calculate_relevance_scores(batch_df, topic_embedding):
-    for col in ['about_embedding', 'edu_exp_embedding', 'social_media_embedding']:
-        if col in batch_df:
-            # Generate the relevance score column based on the embedding columns
-            topic_col = col.split('_')[0]  # Extract the part before '_embedding'
-            batch_df[f'Relevance Scores - {topic_col}'] = batch_df[col].apply(
-                lambda emb: float(util.cos_sim(np.array(eval(emb)), topic_embedding).squeeze()) if pd.notna(emb) else 0.0
-            )
-    return batch_df
-
-# Processing and scoring
-lock_inputs = st.button("Run Scoring")
-
-if lock_inputs and topic_input.strip():
-    with st.spinner("Processing..."):
-        # Encode topic embedding
-        topic_embedding = model.encode([topic_input], convert_to_tensor=True)
-
-        # Process the DataFrame in batches
-        batch_size = 500
-        results = []
-        for i in range(0, len(df), batch_size):
-            batch = df.iloc[i:i+batch_size].copy()
-            batch = calculate_relevance_scores(batch, topic_embedding)
-            results.append(batch)
-
-        # Combine processed batches
-        df_processed = pd.concat(results).reset_index(drop=True)
-
-        # Ensure the necessary columns are available
-        required_columns = ['Relevance Scores - about', 'Relevance Scores - edu_exp', 'Relevance Scores - social_media']
-        if all(col in df_processed.columns for col in required_columns):
-            # Calculate weighted scores
-            df_processed['Weighted_Score'] = (
-                df_processed['Relevance Scores - about'] * weights['about'] +
-                df_processed['Relevance Scores - edu_exp'] * weights['education & experience'] +
-                df_processed['Relevance Scores - social_media'] * weights['social media']
-            )
-
-            # Sort by weighted scores
-            df_sorted = df_processed.sort_values(by='Weighted_Score', ascending=False).reset_index(drop=True)
-
-            # Pagination for results display
-            page_size = 100
-            total_pages = len(df_sorted) // page_size + (len(df_sorted) % page_size > 0)
-            page_number = st.number_input("Page Number", min_value=1, max_value=total_pages, step=1)
-
-            start_idx = (page_number - 1) * page_size
-            end_idx = start_idx + page_size
-            st.write(f"Displaying page {page_number} of {total_pages}")
-            st.write(df_sorted.iloc[start_idx:end_idx][[
-                'id', 'name', 'Weighted_Score', 'Relevance Scores - about',
-                'Relevance Scores - edu_exp', 'Relevance Scores - social_media'
-            ]])
-        else:
-            st.error(f"Missing columns: {', '.join([col for col in required_columns if col not in df_processed.columns])}")
-else:
-    st.warning("Please enter a topic and click 'Run Scoring' to start processing.")
+if __name__ == "__main__":
+    main()
